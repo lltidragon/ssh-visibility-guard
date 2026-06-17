@@ -14,12 +14,17 @@ import os
 import shutil
 
 
-def wrapper_path() -> str:
-    """Path to the ssh-pane wrapper, if installed (enables one-line recommendations)."""
-    local = os.path.expanduser("~/.claude/hooks/ssh-pane")
-    if os.access(local, os.X_OK):
-        return local
-    return shutil.which("ssh-pane") or ""
+def wrapper_cmd() -> str:
+    """How to invoke ssh-pane in a RUNNABLE form, or '' if not installed.
+    Prefer the bare name when it's on PATH; otherwise the explicit ~/.claude/hooks
+    path — so the recommended command actually runs even if the user never added
+    ~/.claude/hooks to PATH (a real gap: a subagent hit 'ssh-pane not found' and
+    had to fall back to raw tmux)."""
+    if shutil.which("ssh-pane"):
+        return "ssh-pane"
+    if os.access(os.path.expanduser("~/.claude/hooks/ssh-pane"), os.X_OK):
+        return "~/.claude/hooks/ssh-pane"
+    return ""
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -309,13 +314,14 @@ def build_state(target_host: str = "") -> str:
 
     # If the ssh-pane wrapper is installed, collapse everything to one line:
     # it finds/opens a visible pane in this window, registers the host, runs, returns output.
-    if wrapper_path():
+    wp = wrapper_cmd()
+    if wp:
         lines.append("RECOMMENDED (ssh-pane installed — visible pane, host auto-registered):")
-        lines.append(f"  ssh-pane run {host_display} '<your command>'")
+        lines.append(f"  {wp} run {host_display} '<your command>'")
         if match:
             lines.append(f"  # reuses pane {match['id']} (already on {match.get('host') or host_display}) in {split_target}")
         else:
-            lines.append(f"  # opens a pane in {split_target or 'your window'}; ssh-pane open {host_display} to just watch")
+            lines.append(f"  # opens a pane in {split_target or 'your window'}; {wp} open {host_display} to just watch")
         return "\n".join(lines)
 
     if match:
