@@ -48,6 +48,8 @@ Two layers, each doing a job the other can't — see [docs/architecture.md](docs
 
 ## Install
 
+> 📖 **Full step-by-step guide** (from installing tmux, incl. TPM plugin setup): **[docs/INSTALL.md](docs/INSTALL.md)**.
+
 ```bash
 git clone https://github.com/lltidragon/ssh-visibility-guard
 cd ssh-visibility-guard
