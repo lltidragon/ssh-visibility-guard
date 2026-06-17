@@ -34,11 +34,15 @@ find_pane() {
     | awk -v h="$host" '$2=="ssh" && $3==h {print $1; exit}'
 }
 
-# Busy-poll until a shell prompt shows up (best-effort; never hard-fail).
+# Busy-poll until the pane is ready for input (best-effort; never hard-fail).
 wait_prompt() {
-  local i
+  local i screen
   for i in $(seq 1 200); do
-    tmux capture-pane -t "$1" -p 2>/dev/null | tail -3 | grep -qE '[#$%>] *$' && return 0
+    # Capture the WHOLE screen, not tail -N: a fresh ssh pane renders its prompt
+    # (including "Password:") at the TOP, so tail would miss it. Also match
+    # password / passphrase prompts, whose "*: " ending isn't a shell prompt.
+    screen="$(tmux capture-pane -t "$1" -p 2>/dev/null || true)"
+    printf '%s' "$screen" | grep -qE '[#$%>] *$|[Pp]assword:|[Pp]assphrase' && return 0
   done
   return 0
 }
@@ -79,6 +83,9 @@ cmd_run() {
   for i in $(seq 1 600); do
     raw="$(tmux capture-pane -t "$pane" -p -S -500 2>/dev/null || true)"
     echo "$raw" | grep -q "${e}_" && break
+    # Stop early if the remote is clearly waiting for interactive input — no point
+    # polling 600× while it sits at a password / passphrase / host-key prompt.
+    echo "$raw" | grep -qE '[Pp]assword:|[Pp]assphrase|\(yes/no' && break
   done
 
   # Print everything between the start marker and the end marker.
@@ -87,9 +94,17 @@ cmd_run() {
     $0 ~ e {f=0}
     f {print}'
 
+  # '|| true': when the remote stalls (e.g. a password prompt) there is no
+  # end-marker, so grep returns non-zero; under set -e + pipefail that would kill
+  # the script and make `ssh-pane run` exit 1 — misleading the caller into thinking
+  # it failed, even though the visible pane was already created (the real goal).
   local code
-  code="$(echo "$raw" | grep -oE "${e}_[0-9]+" | tail -1 | sed 's/.*_//')"
-  [ -n "$code" ] && echo "[ssh-pane: $host pane $pane, remote exit=$code]" >&2 || true
+  code="$(echo "$raw" | grep -oE "${e}_[0-9]+" | tail -1 | sed 's/.*_//')" || true
+  if [ -n "$code" ]; then
+    echo "[ssh-pane: $host pane $pane, remote exit=$code]" >&2
+  else
+    echo "[ssh-pane: $host pane $pane is open & visible; no completion marker yet — still running, or waiting for input like a password]" >&2
+  fi
 }
 
 cmd_list() {
