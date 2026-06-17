@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# ssh-status — compact SSH-pane summary for the tmux status line.
+# Lightweight: reads #{@ssh_host} (set by ssh-pane) or falls back to pane title.
+# Never runs capture-pane (status line refreshes often). No registered host → "?".
+#
+# Emits e.g.:  #[fg=red,bold]SSH:%87→gpu1 %91→wsl#[fg=colour242,nobold] │
+# Empty output when there are no ssh panes (keeps your status bar untouched).
+out=""
+# Use \x1f (unit separator, non-whitespace) so empty @ssh_host fields are NOT
+# folded by read (consecutive TABs would be, shifting columns).
+while IFS=$'\x1f' read -r pid cmd host title; do
+  [ "$cmd" = "ssh" ] || continue
+  if [ -z "$host" ]; then
+    # cheap fallback: pane title often "user@host: cwd"
+    case "$title" in
+      *@*) host="${title%%[: ]*}";;
+      *)   host="?";;
+    esac
+  fi
+  out="$out $pid>$host"
+done < <(tmux list-panes -a -F '#{pane_id}'$'\x1f''#{pane_current_command}'$'\x1f''#{@ssh_host}'$'\x1f''#{pane_title}' 2>/dev/null)
+
+# Pass literals as args too: pids contain '%', which would collide with a
+# printf format string. ASCII '>' avoids multibyte arrow corruption.
+[ -n "$out" ] && printf '%s%s%s' '#[fg=red,bold]SSH:' "$out" '#[fg=colour242,nobold] │ '

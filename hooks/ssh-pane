@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# ssh-pane — run SSH in a VISIBLE tmux pane, registering @ssh_host so tools
+# (ssh-guard, status line) read the host deterministically instead of guessing.
+#
+#   ssh-pane open <host> [ssh-args...]   open a visible ssh pane in Claude's window
+#   ssh-pane run  <host> <command...>    reuse/open the host's pane, run cmd, print output
+#   ssh-pane list                        list registered ssh panes
+#
+# Why this exists: tmux has no "before command" hook and can't see the AI's
+# tool-call intent, so blocking bare ssh stays in the PreToolUse guard. This
+# wrapper only makes the EXECUTION layer stable: one place that opens the pane,
+# stamps the host onto the pane (#{@ssh_host}), and polls a marker for output.
+set -euo pipefail
+
+die() { echo "ssh-pane: $*" >&2; exit 2; }
+command -v tmux >/dev/null || die "tmux not found"
+
+# Window where the caller (Claude / a subagent that inherited $TMUX_PANE) lives.
+# That is the window the user is actually watching — open panes HERE.
+self_window() {
+  local p="${TMUX_PANE:-}"
+  if [ -n "$p" ]; then
+    tmux display-message -t "$p" -p '#{session_name}:#{window_index}'
+  else
+    tmux display-message -p '#{session_name}:#{window_index}' 2>/dev/null || echo ""
+  fi
+}
+
+# An existing visible ssh pane for $host in the self window (matched by @ssh_host).
+find_pane() {
+  local host="$1" win; win="$(self_window)"
+  [ -n "$win" ] || return 0
+  tmux list-panes -t "$win" -F '#{pane_id} #{pane_current_command} #{@ssh_host}' 2>/dev/null \
+    | awk -v h="$host" '$2=="ssh" && $3==h {print $1; exit}'
+}
+
+# Busy-poll until a shell prompt shows up (best-effort; never hard-fail).
+wait_prompt() {
+  local i
+  for i in $(seq 1 200); do
+    tmux capture-pane -t "$1" -p 2>/dev/null | tail -3 | grep -qE '[#$%>] *$' && return 0
+  done
+  return 0
+}
+
+open_pane() {
+  local host="$1"; shift || true
+  local win; win="$(self_window)"
+  [ -n "$win" ] || die "no tmux window (run inside tmux)"
+  local pane
+  pane="$(tmux split-window -h -t "$win" -P -F '#{pane_id}' "ssh $host $*")"
+  tmux set-option -p -t "$pane" @ssh_host "$host"      # deterministic host registration
+  [ -n "${TMUX_PANE:-}" ] && tmux select-pane -t "$TMUX_PANE" 2>/dev/null || true
+  wait_prompt "$pane"
+  echo "$pane"
+}
+
+cmd_open() {
+  [ $# -ge 1 ] || die "open needs <host>"
+  local host="$1"; shift || true
+  local pane; pane="$(find_pane "$host")"
+  [ -n "$pane" ] && { echo "$pane"; return; }
+  open_pane "$host" "$@"
+}
+
+cmd_run() {
+  [ $# -ge 2 ] || die "run needs <host> <command...>"
+  local host="$1"; shift
+  local cmd="$*"
+  local pane; pane="$(find_pane "$host")"
+  [ -n "$pane" ] || pane="$(open_pane "$host")"
+
+  # Unique start/end markers so we can slice THIS run's output out of the
+  # pane's scrollback (avoids matching a previous run's residue).
+  local s="S_${$}_${RANDOM}" e="E_${$}_${RANDOM}"
+  tmux send-keys -t "$pane" "echo $s; $cmd; echo ${e}_\$?" Enter
+
+  local i raw=""
+  for i in $(seq 1 600); do
+    raw="$(tmux capture-pane -t "$pane" -p -S -500 2>/dev/null || true)"
+    echo "$raw" | grep -q "${e}_" && break
+  done
+
+  # Print everything between the start marker and the end marker.
+  echo "$raw" | awk -v s="$s" -v e="$e" '
+    $0 ~ s {f=1; next}
+    $0 ~ e {f=0}
+    f {print}'
+
+  local code
+  code="$(echo "$raw" | grep -oE "${e}_[0-9]+" | tail -1 | sed 's/.*_//')"
+  [ -n "$code" ] && echo "[ssh-pane: $host pane $pane, remote exit=$code]" >&2 || true
+}
+
+cmd_list() {
+  local rows
+  rows="$(tmux list-panes -a -F '#{pane_id}  #{session_name}:#{window_index}  cmd=#{pane_current_command}  host=#{@ssh_host}' 2>/dev/null | grep 'cmd=ssh' || true)"
+  [ -n "$rows" ] && echo "$rows" || echo "(no ssh panes)"
+}
+
+case "${1:-}" in
+  open) shift; cmd_open "$@";;
+  run)  shift; cmd_run "$@";;
+  list) cmd_list;;
+  *) echo "usage: ssh-pane {open <host> [ssh-args]|run <host> <command...>|list}" >&2; exit 2;;
+esac

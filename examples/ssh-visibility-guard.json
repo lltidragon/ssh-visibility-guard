@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to ~/.ssh-visibility-guard.json and set SSH_GUARD_CONFIG to its path.",
+
+  "_hard_block": "true = block (exit 2); false = warn only (exit 0). Default true.",
+  "hard_block": true,
+
+  "_allow_patterns": "Regex exceptions matched against the FULL command. A match means 'allow'. Use for trusted one-shot hosts you accept running bare.",
+  "allow_patterns": [
+    "ssh win '",
+    "ssh desktop '"
+  ]
+}
