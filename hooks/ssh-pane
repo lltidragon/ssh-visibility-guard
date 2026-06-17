@@ -42,7 +42,7 @@ wait_prompt() {
     # (including "Password:") at the TOP, so tail would miss it. Also match
     # password / passphrase prompts, whose "*: " ending isn't a shell prompt.
     screen="$(tmux capture-pane -t "$1" -p 2>/dev/null || true)"
-    printf '%s' "$screen" | grep -qE '[#$%>] *$|[Pp]assword:|[Pp]assphrase' && return 0
+    printf '%s' "$screen" | grep -qE '[#$%>] *$|[Pp]assword:|[Pp]assphrase|\(yes/no' && return 0
   done
   return 0
 }
@@ -52,8 +52,14 @@ open_pane() {
   local win; win="$(self_window)"
   [ -n "$win" ] || die "no tmux window (run inside tmux)"
   local pane
-  pane="$(tmux split-window -h -t "$win" -P -F '#{pane_id}' "ssh $host $*")"
-  tmux set-option -p -t "$pane" @ssh_host "$host"      # deterministic host registration
+  # accept-new: don't stall on the first-connect host-key (yes/no) prompt.
+  # ConnectTimeout: fail fast instead of hanging when the host is unreachable.
+  pane="$(tmux split-window -h -t "$win" -P -F '#{pane_id}' "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 $host $*")"
+  # If ssh died instantly (bad host alias / missing key / unreachable), the pane is
+  # already gone and set-option fails with "can't find pane" — translate that into a
+  # clear connection error instead of a cryptic tmux message.
+  tmux set-option -p -t "$pane" @ssh_host "$host" 2>/dev/null \
+    || die "ssh exited immediately for '$host' — connection failed (check host alias in ~/.ssh/config, key, or network; if ~/.ssh was reset, restore it first)."
   [ -n "${TMUX_PANE:-}" ] && tmux select-pane -t "$TMUX_PANE" 2>/dev/null || true
   wait_prompt "$pane"
   echo "$pane"
@@ -77,19 +83,39 @@ cmd_run() {
   # Unique start/end markers so we can slice THIS run's output out of the
   # pane's scrollback (avoids matching a previous run's residue).
   local s="S_${$}_${RANDOM}" e="E_${$}_${RANDOM}"
-  tmux send-keys -t "$pane" "echo $s; $cmd; echo ${e}_\$?" Enter
+  # Pick a marker syntax the remote shell understands. Windows cmd.exe doesn't treat
+  # ';' as a separator and has no $? — a unix-style marker line is echoed verbatim and
+  # never completes. Detect a cmd prompt (DRIVE:\...>) and use '&' + %errorlevel%;
+  # unix and PowerShell both handle the ';' form.
+  local lastln; lastln="$(tmux capture-pane -t "$pane" -p 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)"
+  if printf '%s' "$lastln" | grep -qE '[A-Za-z]:\\.*>[[:space:]]*$' && ! printf '%s' "$lastln" | grep -q 'PS '; then
+    tmux send-keys -t "$pane" "echo $s& $cmd& echo ${e}_%errorlevel%" Enter   # Windows cmd.exe
+  else
+    tmux send-keys -t "$pane" "echo $s; $cmd; echo ${e}_\$?" Enter             # unix / PowerShell
+  fi
 
   local i raw=""
-  for i in $(seq 1 600); do
+  for i in $(seq 1 300); do
     raw="$(tmux capture-pane -t "$pane" -p -S -500 2>/dev/null || true)"
-    echo "$raw" | grep -q "${e}_" && break
+    # Match the REAL end marker (E_..._<numeric exitcode>), NOT the command-echo line
+    # which contains the literal "E_..._%errorlevel%" (cmd) or "E_..._$?" (unix). The
+    # echo shows up instantly on send-keys; matching it would break before the command
+    # has actually run — fatal on slow remotes like Windows cmd over ssh.
+    printf '%s\n' "$raw" | grep -qE "${e}_[0-9]" && break
     # Stop early if the remote is clearly waiting for interactive input — no point
-    # polling 600× while it sits at a password / passphrase / host-key prompt.
-    echo "$raw" | grep -qE '[Pp]assword:|[Pp]assphrase|\(yes/no' && break
+    # polling while it sits at a password / passphrase / host-key prompt. Only look at
+    # the LAST few lines: a live prompt is at the bottom of the screen. Scanning the
+    # whole -S -500 scrollback would match a STALE host-key "(yes/no" from an earlier
+    # connect and break on the very first poll, before the command has produced output.
+    printf '%s\n' "$raw" | tail -n 3 | grep -qE '[Pp]assword:|[Pp]assphrase|\(yes/no' && break
+    # A bare busy-loop blows through all iterations in milliseconds — long before a
+    # round-trip to a remote (especially Windows cmd over ssh) produces the end
+    # marker. Pace the poll so it actually waits for output (300 × 0.2s = 60s cap).
+    sleep 0.2
   done
 
   # Print everything between the start marker and the end marker.
-  echo "$raw" | awk -v s="$s" -v e="$e" '
+  printf '%s\n' "$raw" | awk -v s="$s" -v e="$e" '
     $0 ~ s {f=1; next}
     $0 ~ e {f=0}
     f {print}'
@@ -99,7 +125,7 @@ cmd_run() {
   # the script and make `ssh-pane run` exit 1 — misleading the caller into thinking
   # it failed, even though the visible pane was already created (the real goal).
   local code
-  code="$(echo "$raw" | grep -oE "${e}_[0-9]+" | tail -1 | sed 's/.*_//')" || true
+  code="$(printf '%s\n' "$raw" | grep -oE "${e}_[0-9]+" | tail -1 | sed 's/.*_//')" || true
   if [ -n "$code" ]; then
     echo "[ssh-pane: $host pane $pane, remote exit=$code]" >&2
   else
