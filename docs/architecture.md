@@ -63,10 +63,13 @@ When `ssh-pane` is installed, the guard's block message collapses to a single
 
 ## Why host registration matters
 
-Without the wrapper, the guard infers a pane's host by scraping the pane title
-or prompt — a heuristic that misfires (e.g. a title left over from a local
-shell). With `ssh-pane`, `#{@ssh_host}` is set at connect time and read back
-deterministically by both the guard and the status line.
+The host shown for an SSH pane comes **only** from `#{@ssh_host}`, which
+`ssh-pane` sets at connect time. Both the guard and the status line read it back
+deterministically, so they always agree. A pane opened **without** `ssh-pane`
+shows `?` — we deliberately do NOT guess from the pane title or scrollback,
+because that misfires (a leftover local hostname looks like a remote host) and
+would make the guard claim a host it isn't sure of. The cure is to open panes
+with `ssh-pane`, which registers the host for certain.
 
 ## Files
 

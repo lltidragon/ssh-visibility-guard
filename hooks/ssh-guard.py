@@ -202,34 +202,12 @@ def get_client_views() -> list[dict]:
 
 
 def get_pane_ssh_host(pane_id: str) -> str:
-    """Detect remote hostname for an SSH pane."""
-    # Method 0: explicit registration by the ssh-pane wrapper (deterministic).
-    opt = tmux_run("display-message", "-t", pane_id, "-p", "#{@ssh_host}")
-    if opt:
-        return opt
-
-    # Method 1: pane title (SSH usually sets this to "user@host")
-    title = tmux_run("display-message", "-t", pane_id, "-p", "#{pane_title}")
-    if title and title not in ("bash", "zsh", "sh", "fish", "tmux", ""):
-        # "user@host: ~" → take "user@host"
-        candidate = re.split(r'[\s:]', title)[0]
-        if "@" in candidate or re.match(r'^[\w][\w.-]{2,}$', candidate):
-            return candidate
-
-    # Method 2: last few lines of pane content — look for shell prompt
-    content = tmux_run("capture-pane", "-t", pane_id, "-p", "-S", "-8")
-    lines = [l.rstrip() for l in content.splitlines() if l.strip()]
-    for line in reversed(lines):
-        # Linux/Mac: "user@hostname:~$" or "user@hostname ~$"
-        m = re.search(r'([\w][\w.-]*@[\w][\w.-]+)', line)
-        if m:
-            return m.group(1)
-        # Windows: "user@HOSTNAME C:\..."
-        m = re.search(r'([\w]+@[\w-]+)\s+[A-Z]:\\', line)
-        if m:
-            return m.group(1)
-
-    return ""
+    """Remote host for an SSH pane — ONLY the deterministic @ssh_host that
+    ssh-pane registers at connect time. We deliberately do NOT guess from the
+    pane title or scrollback: those misfire (a leftover local hostname looks
+    like a remote host) and would make the guard claim a host it isn't sure of.
+    A pane opened without ssh-pane returns "" → shown as '?', same as ssh-status."""
+    return tmux_run("display-message", "-t", pane_id, "-p", "#{@ssh_host}")
 
 
 def get_all_panes() -> list[dict]:
@@ -268,7 +246,7 @@ def get_all_panes() -> list[dict]:
 def _fmt_ssh_pane(p: dict) -> str:
     flag = "★" if p["active"] else " "
     tui  = " [TUI]" if p["tui"] else ""
-    host = f"  → {p['host']}" if p.get("host") else "  → (host unknown)"
+    host = f"  → {p['host']}" if p.get("host") else "  → ?"
     return f"  {flag} {p['id']}  {p['loc']}  {p['width']}x{p['height']}{tui}{host}"
 
 
