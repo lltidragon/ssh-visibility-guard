@@ -22,4 +22,7 @@ done < <(tmux list-panes -a -F '#{pane_id}'$'\x1f''#{pane_current_command}'$'\x1
 
 # Pass literals as args too: pids contain '%', which would collide with a
 # printf format string. ASCII '>' avoids multibyte arrow corruption.
-[ -n "$out" ] && printf '%s%s%s' '#[fg=red,bold]SSH:' "$out" '#[fg=colour242,nobold] │ '
+if [ -n "$out" ]; then
+  printf '%s%s%s' '#[fg=red,bold]SSH:' "$out" '#[fg=colour242,nobold] │ '
+fi
+exit 0   # no ssh panes is normal, not an error
